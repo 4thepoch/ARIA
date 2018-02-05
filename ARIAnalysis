@@ -1,0 +1,489 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# Support both python2 and python3
+from __future__ import division, print_function, unicode_literals
+
+# Common Import
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler as mms  # 차후 Scaler 선택가능하도록 확장 필요
+# from sklearn.preprocessing import PolynomialFeatures # 차후 다항선형회귀분석 기법 선택 시 import 필요
+import os
+import numpy as np
+import pandas as pd
+import ARIApySpark
+from datetime import datetime, date, timedelta
+import tensorflow as tf
+import hyperengine as hype
+
+
+class ARIAnalysis:
+    # ARIAnalysis Class Initiation
+    def __init__(self, pyspark=None):  ############################################## !!! Review Needed
+
+        # SparkContext reusing (default =>> for local test )
+        if (pyspark is None):
+            self.pyspark = ARIApySpark.ARIApyspark('admin_test')
+        else:
+            self.pyspark = pyspark
+        self.PROJECT_PATH = "/home/hadoop/PycharmProjects/test/model/"
+        self.FILESYSTEM_PATH = "/home/hadoop/filesystem/vpndata/mldata/"
+        self.DATA_SERIES = 1  ### "0": daily 이상,     "1": 1분 데이터
+        # if projPath is None:        ############################################## !!! Review Needed
+        #     PROJECT_PATH = "/home/hadoop/PycharmProjects/test/"
+        # else:
+        #     PROJECT_PATH = projPath
+        #
+        # if fsPath is None:        ############################################## !!! Review Needed
+        #     FILESYSTEM_PATH = "/home/hadoop/filesystem/vpndata/mldata/"
+        # else:
+        #     FILESYSTEM_PATH = fsPath
+
+    def loadData(self, sDate=None, eDate=None):  ## ARIA 개발할 경우에는 파악되지 않은 데이터를 받아서 정리해야 하므로 데이터형식 / 데이터유형 / 사이즈 고려 필요
+        nowDate = datetime.now()
+        if sDate is None:
+            sDate = nowDate.strftime('%Y%m%d')
+        else:
+            sDate = sDate
+        if eDate is None:
+            eDate = nowDate.strftime('%Y%m%d')
+        else:
+            eDate = eDate
+        if int(sDate) > int(eDate):
+            tmp = sDate
+            sDate = eDate
+            sDate = tmp
+
+        self.pyspark.initLocalData(self.FILESYSTEM_PATH, sDate, eDate)  ## !!! HADOP으로 변경 필요
+
+        # load .txt file(format = csv) on local environment  (not Hadoop Filesystem)
+        allData = self.pyspark.selectData("*")
+
+        ############################################################################## Review Needed
+        if allData.count() == 1:
+            self.DATA_SERIES = 1
+        else:
+            self.DATA_SERIES = 0
+
+        return allData
+
+    def setData_series(self, flag):
+        self.DATA_SERIES = flag
+
+    def preProcData(self, allData, pickedCols=None):  ##### PREPROCESSING DATA ######
+        print("into preProcData")
+
+        # preProcData(allData, [2, 4, 9, 10, 11, 3]) inv01
+        # preProcData(allDate, [6, 8, 9, 10, 11, 7]) inv02
+
+        ###### Transform Data - Pivoting Data ######
+        #allData = data.groupBy("YEAR", "MONTH", "DAY", "HOUR", "MINUTE").pivot("TAG_ID").sum("VALUE").sort(
+        #    "YEAR", "MONTH", "DAY", "HOUR", "MINUTE").toPandas().dropna(axis=0)
+
+        ###### Transform Data - Combine or Concatenate Data ###### >>>>> 필요없는 컬럼 제거하는 알고리즘 필요 (중요도 낮은 컬럼 삭제 - 알고리즘 연구필요)
+        # Variable Declare - Columns for Handling
+        dateCols = ["YEAR", "MONTH", "DAY", "HOUR", "MINUTE"]
+
+        # Date Concatenation (YEAR+ MONTH + DAY + HOUR + MINUTE) -ex: 2018 1 5 2 5 ==> 201801050205
+        #for i in dateCols:
+        #    allData[i] = allData[i].apply('{:0>2}'.format)
+
+        #allData['DATE'] = allData[["YEAR", "MONTH", "DAY", "HOUR", "MINUTE"]].apply(
+        #    lambda x: '{}{}{}{}{}'.format(x[0], x[1], x[2], x[3], x[4]), axis=1)
+
+        ###### Transform Data - Removing Useless Data
+        # Useless Columns Removing
+        for i in dateCols:
+            del allData[i]
+
+        ###### Transform Data - Column Sequence Arrange >> 차후에는 컬럼인덱스와 컬럼명 맵핑 필요 >> 인덱스 접근 >> 시각화에서 컬럼명 반환
+        # Column Sequence Management
+        cols = allData.columns.tolist()
+        print(cols)
+
+        #cols_all = cols[-1:] + cols[:-1]
+        #allData = allData[cols_all]
+        #print(allData.columns)
+
+        ###### Transform Data - Customizing based on Data Property - !!!!! update needed (number of inverter or plant id etc. will be automatically detected)
+        # Separate Data based on No. of Inverter
+
+        if pickedCols is None:
+            rawData = allData.iloc[:, :]
+        else:
+            rawData = allData.iloc[:, pickedCols]
+
+        ##### Transform Data - Transform Type of Data for using analysis libraries - !!!!! update needed (for loop type)
+
+        np_Raw_Data = rawData.values  # inv01 Raw Data - ndarray
+        # np_inv02_Raw_Data = inv02_Data.values  # inv02 Raw Data - ndarray          inv02_Data.values ==> rawData.values
+        np_Data = np_Raw_Data.copy()
+        # np_inv02_Data = np_inv02_Raw_Data.copy()
+        m, n = np_Data.shape
+        print("inv_Data - row: ", m, " col: ", n)
+
+        # if DC_I = 0 : DC_V = 0 ------- !!!!! have to upgrade code for flexible module
+        for i in range(0, m):
+            if np_Data[i, 0] <= 0:
+                np_Data[i, 1] = 0
+
+        # split train / test dataset
+        if self.DATA_SERIES == 0:
+            train_set, test_set = train_test_split(np_Data, test_size=0.2, random_state=42)
+            # inv02_train_set, inv02_test_set = train_test_split(np_inv02_Data, test_size=0.2, random_state=42)
+
+            # separate label data from raw data
+            train_y = train_set[:, -1].reshape((-1, 1))
+            test_y = test_set[:, -1].reshape((-1, 1))
+            inv01_train_y_acc = train_y.copy()
+
+            ##### Feature Scaling
+            scaler_train_X = mms().fit(train_set[:, :-1])
+            scaler_train_y = mms().fit(train_y)
+            train_y = scaler_train_y.transform(train_y)
+            train_X = scaler_train_X.transform(train_set[:, :-1])
+
+            scaler_test_X = mms().fit(test_set[:, :-1])
+            scaler_test_y = mms().fit(test_y)
+            test_y = scaler_test_y.transform(test_y)
+            test_X = scaler_test_X.transform(test_set[:, :-1])
+
+            print("train_X.shape: ", train_X.shape)
+            print("train_y.shape: ", train_y.shape)
+            print("train_y: ", train_y)
+
+            m1, n1 = train_X.shape
+            print("m1: ", m1, " n1: ", n1)
+            return {"trX": train_X, "trY": train_y, "teX": test_X, "teY": test_y}, scaler_train_y
+
+        else:
+            try:
+                train_y = np_Data[:, -1].reshape((-1, 1))
+                scaler_train_X = mms().fit(np_Data[:, :-1])
+                scaler_train_y = mms().fit(train_y)
+                train_y = scaler_train_y.transform(train_y)
+                train_X = scaler_train_X.transform(np_Data[:, :-1])
+                print(train_X)
+                print(train_y)
+                return {"trX": train_X, "trY": train_y}, scaler_train_y
+            except Exception as e:
+                print("preProcData Error By : flag 1")
+                print(e)
+
+    def analyzeData(self, data):  ### typeML = lr and nn
+
+        # mlType = typeML
+        # Real-time Data or Daily Data
+        ttData, scalerY = data
+        train_X = ttData["trX"]
+        trm, trn = train_X.shape
+        train_y = ttData["trY"]
+        returnDict = {}
+
+        if self.DATA_SERIES == 0:
+            # Daily Data Declare
+            test_X = ttData["teX"]
+            tem, ten = test_X.shape
+            test_y = ttData["teY"]
+            print("##########tem##################")
+            print(tem)
+            w,hy_val = self.linearRegression(train_X = train_X,train_y = train_y, test_X = test_X, test_y = test_y,scalerY = scalerY, trn= trn, trm = trm, tem = tem, typeML = 'lr')
+            self.nnMLP(train_X = train_X,train_y = train_y, test_X = test_X, test_y = test_y,scalerY = scalerY, trn= trn, trm = trm, tem = tem, typeML = 'nn')
+
+            return w
+        else:
+            returnDict['lr'] = self.linearRegression(train_X = train_X, train_y = train_y, scalerY = scalerY, trn = trn, trm = trm, typeML = 'lr')
+            returnDict['nn'] = self.nnMLP(train_X = train_X, train_y = train_y, scalerY = scalerY, trn = trn, trm = trm, typeML = 'nn')
+
+            #returnDict['nn'] = self.nnMLP(train_X, train_y, scalerY = scalerY, trm = trm, typeML = 'nn')
+            return returnDict
+
+
+    # 훈련모델 저장 함수
+    def saveModel(self, sess, typeML):
+        nowDate = date.today()
+        #saveModelName = os.path.join(self.PROJECT_PATH + nowDate.strftime('%Y%m%d') + "/" + typeML + "/" + nowDate.strftime('%Y%m%d_') + typeML + '_model')
+        saveModelName = os.path.join(self.PROJECT_PATH + "oldModel/" + typeML + "/" + typeML+ '_model')
+
+        #if(os.path.exists(self.PROJECT_PATH + nowDate.strftime('%Y%m%d') + "/" + typeML) == False):
+        #	os.makedirs(self.PROJECT_PATH + nowDate.strftime('%Y%m%d') + "/" + typeML)
+
+        if(os.path.exists(self.PROJECT_PATH + "oldModel/" + typeML) == False):
+            os.makedirs(self.PROJECT_PATH + "oldModel/" + typeML)
+
+        sv = tf.train.Saver()
+        sv.save(sess, saveModelName)
+
+    # 훈련모델 로드 함수
+    def loadModel(self, sess, typeML):
+        yesterday = date.today() - timedelta(days=1)
+        #loadModelName = os.path.join(self.PROJECT_PATH + yesterday.strftime('%Y%m%d') + "/" + typeML + "/" + yesterday.strftime('%Y%m%d_') + typeML + '_model.meta')
+        #loadModelName = os.path.join(self.PROJECT_PATH + '20180129' + "/" + typeML + "/" + "20180129_" + typeML + '_model.meta')
+        loadModelName = os.path.join(self.PROJECT_PATH +  "oldModel/" + typeML + "/" + typeML + '_model.meta')
+        if os.path.isfile(loadModelName):
+            sv = tf.train.Saver()
+            tf.train.import_meta_graph(loadModelName)
+            #sv.restore(sess, tf.train.latest_checkpoint(self.PROJECT_PATH + "20180129" + "/" + typeML + "/"))
+            sv.restore(sess, tf.train.latest_checkpoint(self.PROJECT_PATH + "oldModel/" + typeML + "/"))
+
+        else:
+            return print('File not exists -', str(loadModelName))
+
+    # def loadModel(self, sess, typeML, saver):
+    #     yesterday = date.today() - timedelta(days=1)
+    #     loadModelName = os.path.join(self.PROJECT_PATH + yesterday.strftime('%Y%m%d') + "/" + yesterday.strftime('%Y%m%d_') + typeML + '_model.meta')
+    #
+    #     if os.path.isfile(loadModelName):
+    #         tf.train.import_meta_graph(loadModelName)
+    #         saver.restore(sess, tf.train.latest_checkpoint(self.PROJECT_PATH + yesterday.strftime('%Y%m%d') + "/"))
+    #         return 0
+    #     else:
+    #         print('File not exists -', str(loadModelName))
+    #         return 1
+
+    def fetch_batch(self, X, y, epoch, batches, batch_index, batch_size, m):
+        np.random.seed(epoch * batches + batch_index)
+        indices = np.random.randint(m, size=batch_size)
+        X_batch = X[indices]
+        y_batch = y[indices]
+        return X_batch, y_batch
+
+    def linearRegression(self, train_X, train_y,trm, typeML, scalerY, trn, tem =None, test_X = None, test_y = None):  ## 차후 기법들만 따로 관리 필요 (다른 파일로 생성 / 관리)
+        print("##### Linear Regression Training Process Started!!#####")
+        tf.reset_default_graph()
+        # Train environment Setting
+        X = tf.placeholder(tf.float32, shape=(None, trn), name="X")
+        y = tf.placeholder(tf.float32, shape=(None, 1), name="y")
+        w = tf.Variable(tf.random_uniform([trn, 1], -1.0, 1.0), name="weight")
+        b = tf.Variable(tf.random_normal([1]), name='bias')
+
+        # 변수 선언 바로 밑에 saver 선언해 저장할 weight를 넣어줌
+        #param_list = [w, b]
+        #saver = tf.train.Saver(param_list)
+
+        #########
+        #print("##############################################")
+        #print(train_X)
+        #print(tem)
+        ######
+        #### hyperparameter #####
+        batch_size = 100
+        n_batches = int(np.ceil(trm / batch_size))
+        learning_rate = 1e-3
+        n_epochs = 200
+
+        hypothesis = tf.matmul(X, w, name="hypothesis") + b
+        cost = tf.reduce_mean(tf.square(hypothesis - y))
+        optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
+
+        #loaded_graph = tf.Graph()
+        #new_saver = tf.train.Saver()
+        # Session 생성
+        with tf.Session() as sess:
+            sess.run(tf.global_variables_initializer())
+            self.loadModel(sess, typeML)
+
+            # if self.loadModel(sess, typeML, new_saver) ==0: ### 기존 모델 불러오기
+            #     hypothesis = loaded_graph.get_tensor_by_name('hypothesis:0')
+            #     cost = loaded_graph.get_tensor_by_name('cst:0')
+            #     w = loaded_graph.get_tensor_by_name('weight:0')
+            #     b = loaded_graph.get_tensor_by_name('bias:0')
+            #     X = loaded_graph.get_tensor_by_name('X:0')
+            #     y = loaded_graph.get_tensor_by_name('y:0')
+            if self.DATA_SERIES == 0:
+                n_batches_test = int(np.ceil(tem / batch_size))
+                for epoch in range(n_epochs):
+                    for batch_index in range(n_batches):
+                        X_batch, y_batch = self.fetch_batch(train_X, train_y, epoch, n_batches, batch_index, batch_size, trm)
+                        cost_val, hy_val, _ = sess.run([cost, hypothesis, optimizer], feed_dict={X: X_batch, y: y_batch})
+                        if epoch % 100 == 0:
+                            print("train-Epoch: ", '%d' % (epoch + 1), "cost: ", cost_val)
+                # Test model
+                print("\n===== TEST ======")
+                # Calculate the accuracy
+                for epoch in range(n_epochs):
+                    for batch_index in range(n_batches_test):
+                        X_batch, y_batch = self.fetch_batch(test_X, test_y, epoch, n_batches, batch_index, batch_size, tem)
+                        cost_val, hy_val = sess.run([cost, hypothesis], feed_dict={X: X_batch, y: y_batch})
+                    if epoch % 10 == 0:
+                        print("test-Epoch: ", '%d' % (epoch + 1), "Test Cost:", cost_val)
+
+                #self.saveModel(sess, typeML)
+                #tf.reset_default_graph()
+                #sess.close()
+                return w.eval(sess), hy_val
+            else:
+                cost_val, hy_val = sess.run([cost, hypothesis], feed_dict={X: train_X, y: train_y})
+                print("Prediction Cost: ", cost_val, "\n")
+                pred_val = scalerY.inverse_transform(hy_val)
+                print("Prediction Value: ", pred_val)
+                sess.close()
+                return pred_val.tolist()
+
+    def nnMLP(self, train_X, train_y,trm, typeML, scalerY, trn, tem =None, test_X = None, test_y = None):  ## 차후 기법들만 따로 관리 필요 (다른 파일로 생성 / 관리)
+        print("##### Linear Regression Training Process Started!!#####")
+        tf.reset_default_graph()
+        # Train environment Setting
+        X = tf.placeholder(tf.float32, shape=(None, trn), name="X")
+        y = tf.placeholder(tf.float32, shape=(None, 1), name="y")
+        w = tf.Variable(tf.random_uniform([trn, 1], -1.0, 1.0), name="weight")
+        b = tf.Variable(tf.random_normal([1]), name='bias')
+
+        # 변수 선언 바로 밑에 saver 선언해 저장할 weight를 넣어줌
+        #param_list = [w, b]
+        #saver = tf.train.Saver(param_list)
+
+        #########
+        #print("##############################################")
+        #print(train_X)
+        #print(tem)
+        ######
+        #### hyperparameter #####
+        batch_size = 40
+        n_batches = int(np.ceil(trm / batch_size))
+        learning_rate = 1e-4
+        n_epochs = 70
+
+        hypothesis = tf.matmul(X, w, name="hypothesis") + b
+        cost = tf.reduce_mean(tf.square(hypothesis - y))
+        optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
+
+        #loaded_graph = tf.Graph()
+        #new_saver = tf.train.Saver()
+        # Session 생성
+        with tf.Session() as sess:
+            sess.run(tf.global_variables_initializer())
+            self.loadModel(sess, typeML)
+
+            if self.DATA_SERIES == 0:
+                n_batches_test = int(np.ceil(tem / batch_size))
+                for epoch in range(n_epochs):
+                    for batch_index in range(n_batches):
+                        X_batch, y_batch = self.fetch_batch(train_X, train_y, epoch, n_batches, batch_index, batch_size, trm)
+                        cost_val, hy_val, _ = sess.run([cost, hypothesis, optimizer], feed_dict={X: X_batch, y: y_batch})
+                        if epoch % 100 == 0:
+                            print("train-Epoch: ", '%d' % (epoch + 1), "cost: ", cost_val)
+                # Test model
+                print("\n===== TEST ======")
+                # Calculate the accuracy
+                for epoch in range(n_epochs):
+                    for batch_index in range(n_batches_test):
+                        X_batch, y_batch = self.fetch_batch(test_X, test_y, epoch, n_batches, batch_index, batch_size, tem)
+                        cost_val, hy_val = sess.run([cost, hypothesis], feed_dict={X: X_batch, y: y_batch})
+                    if epoch % 10 == 0:
+                        print("test-Epoch: ", '%d' % (epoch + 1), "Test Cost:", cost_val)
+
+                #self.saveModel(sess, typeML)
+                #tf.reset_default_graph()
+                #sess.close()
+                return w.eval(sess), hy_val
+            else:
+                cost_val, hy_val = sess.run([cost, hypothesis], feed_dict={X: train_X, y: train_y})
+                print("Prediction Cost: ", cost_val, "\n")
+                pred_val = scalerY.inverse_transform(hy_val)
+                print("Prediction Value: ", pred_val)
+                sess.close()
+                return pred_val.tolist()
+
+'''
+def nnMLP(self, train_X, train_y,trm, typeML, scalerY, tem = None, test_X = None, test_y = None):
+    tf.reset_default_graph()
+    # Hyper-parameters
+    batch_size = 100
+    n_batches = int(np.ceil(trm / batch_size))
+    learning_rate = 1e-3
+    n_epochs = 200
+
+    # Model architecture parameters
+    n_input = train_X.shape[1]  # VPN data input (DC_V, DC_I, ATEMP, MTEMP, RADIATION)
+    n_hidden_1 = 80
+    n_hidden_2 = 60
+    n_hidden_3 = 35
+    n_hidden_4 = 15
+    n_output = 1  # Predicted Power
+
+    # Placeholder
+    X = tf.placeholder(tf.float32, [None, n_input])
+    y = tf.placeholder(tf.float32, [None, n_output])
+
+    # Initializers
+    sigma = 1
+    weight_initializer = tf.variance_scaling_initializer(mode="fan_avg", distribution="uniform", scale=sigma)
+    bias_initializer = tf.zeros_initializer()
+
+    ##### Variables for hidden weights and biases #####
+
+    # Layer 1
+    w_hidden_1 = tf.Variable(weight_initializer([n_input, n_hidden_1]))
+    bias_hidden_1 = tf.Variable(bias_initializer([n_hidden_1]))
+
+    # Layer 2
+    w_hidden_2 = tf.Variable(weight_initializer([n_hidden_1, n_hidden_2]))
+    bias_hidden_2 = tf.Variable(bias_initializer([n_hidden_2]))
+
+    # Layer 3
+    w_hidden_3 = tf.Variable(weight_initializer([n_hidden_2, n_hidden_3]))
+    bias_hidden_3 = tf.Variable(bias_initializer([n_hidden_3]))
+
+    # Layer 4
+    w_hidden_4 = tf.Variable(weight_initializer([n_hidden_3, n_hidden_4]))
+    bias_hidden_4 = tf.Variable(bias_initializer([n_hidden_4]))
+
+    # Output layer
+    w_out = tf.Variable(weight_initializer([n_hidden_4, n_output]))
+    bias_out = tf.Variable(bias_initializer([n_output]))
+
+    #### Hidden Layer
+    hidden_1 = tf.nn.relu(tf.add(tf.matmul(X, w_hidden_1), bias_hidden_1))
+    hidden_2 = tf.nn.relu(tf.add(tf.matmul(hidden_1, w_hidden_2), bias_hidden_2))
+    hidden_3 = tf.nn.relu(tf.add(tf.matmul(hidden_2, w_hidden_3), bias_hidden_3))
+    hidden_4 = tf.nn.relu(tf.add(tf.matmul(hidden_3, w_hidden_4), bias_hidden_4))
+
+    #### Out Layer
+    out = tf.transpose(tf.add(tf.matmul(hidden_4, w_out), bias_out), name='out')
+
+    # Cost function
+    cost = tf.reduce_mean(tf.squared_difference(out, y))
+
+    # Optimizer
+    opt = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost)
+
+    # loaded_graph = tf.Graph()
+    # new_saver = tf.train.Saver()
+    # Make Session
+    with tf.Session() as sess:
+        # Run variable initializer
+        sess.run(tf.global_variables_initializer())
+        self.loadModel(sess, typeML)
+
+        if self.DATA_SERIES == 0:
+            n_batches_test = int(np.ceil(tem / batch_size))
+            for epoch in range(n_epochs):
+                for batch_index in range(n_batches):
+                    X_batch, y_batch = self.fetch_batch(train_X, train_y, epoch, n_batches, batch_index, batch_size,
+                                                        trm)
+                    cost_val, hy_val, _ = sess.run([cost, out, opt], feed_dict={X: X_batch, y: y_batch})
+                    if epoch % 100 == 0:
+                        print("train-Epoch: ", '%d' % (epoch + 1), "cost: ", cost_val)
+
+            # Test model
+            print("\n===== TEST ======")
+            # Calculate the accuracy
+            for epoch in range(n_epochs):
+                for batch_index in range(n_batches_test):
+                    X_batch, y_batch = self.fetch_batch(test_X, test_y, epoch, n_batches, batch_index, batch_size,
+                                                        tem)
+                    cost_val, hy_val = sess.run([cost, out], feed_dict={X: X_batch, y: y_batch})
+                    if epoch % 10 == 0:
+                        print("test-Epoch: ", '%d' % (epoch + 1), "Test Cost:", cost_val)
+            #self.saveModel(sess, typeML)
+            #tf.reset_default_graph()
+            sess.close()
+        else:
+            cost_val, hy_val = sess.run([cost, out], feed_dict={X: train_X, y: train_y})
+            print("Prediction Cost: ", cost_val, "\n")
+            pred_val = scalerY.inverse_transform(hy_val)
+            print("Prediction Value: ", pred_val)
+            sess.close()
+            return pred_val.tolist()
+'''
