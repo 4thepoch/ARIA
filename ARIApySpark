@@ -1,0 +1,185 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from pyspark import SparkConf, SparkContext
+from pyspark.sql import SQLContext
+import pandas as pd
+import subprocess
+import os
+
+class ARIApyspark:
+	# ARIApyspark Class Initiation
+	def __init__(self, appName, hdurl = 'hdfs://***.***.*.***:****', sc = None):
+		#if(self.hdfsExists('/') == False):
+		#	print('ARIApyspark ERROR : HDFS CONNECTION REFUSE!!')
+			
+		
+		# Default HDFS URL Configuration
+		self.hdurl= hdurl
+		
+		# SparrContext Initiation
+		#self.sc = SparkContext(conf=SparkConf().setAppName(appName))
+		if(sc is None):
+			self.sc = SparkContext("local[4]",appName)
+		else :
+			self.sc = sc 
+
+		# sqlContext Initiation
+		self.sqlContext = SQLContext(self.sc)
+	def getSparkContext(self):
+		return self.sc
+	
+	# Dataframe Initiation
+	def initData(self, startDate, endDate, flag = 0 , filePath = '/csv/day/'):
+		# ARIAdate obj Creation
+		dateFunc = ARIAdate()
+		
+		fileList = []
+
+		# File Name List Creation
+		if(flag == 0 ):
+			for df in dateFunc.betweenDate(startDate, endDate, '%Y%m%d'):
+				#if(self.hdfsExists(filePath + df + '*', 'f')):
+				fileList.append(self.hdurl+filePath+df+'*')
+		
+		#print(fileList)
+		
+
+		self.syear = startDate[0:4]
+		self.eyear = endDate[0:4]
+		
+		# READ HDFS FILE
+		if(flag == 0):
+			self.df = self.sqlContext.read.load(fileList, format='com.databricks.spark.csv', header='true', inferSchema='true')
+		else:
+			self.df = self.sqlContext.read.load(self.hdurl+filePath+'*', format='com.databricks.spark.csv', header='true', inferSchema='true')
+
+
+		# Set DataFrame as Temporary Table
+		self.df.createOrReplaceTempView('ARIA')
+
+	# localData Initiation
+        def initLocalData(self, filepath, startDate, endDate):
+                try:
+                        # ARIAdate Obj Cration
+                        dateFunc = ARIAdate()
+			# syear, eyear  Initial Value	
+			self.syear = startDate[0:4]
+			self.eyear = endDate[0:4]
+			
+			# fileList Creation
+                        fileList = []
+
+                        for df in dateFunc.betweenDate(startDate, endDate, '%Y%m%d'):
+                                if(os.path.exists(filepath + df + '_csv.txt')):
+					fileList.append(filepath + df + '_csv.txt')
+
+			# pandas DataFrame List Creation
+			dfList = []
+
+			for filestr in fileList:
+				tempDf = pd.read_csv(filestr)
+				tempDf['YEAR'] = tempDf.YEAR.astype(str)
+				dfList.append(tempDf)
+	
+			# DataFrame Assembled
+                 	totDf = dfList[0]
+                 	i = 1
+                 	for df in dfList[1:]:
+                        	i = i + 1
+                        	totDf = pd.concat([totDf, df])
+			
+			# Transfer pandas Dataframe to Spark Dataframe
+			self.df = self.sqlContext.createDataFrame(totDf)
+			# Set DataFrame to temporary table
+			self.df.createOrReplaceTempView('ARIA')
+                except Exception as e:
+                        print('init Local Data Error ')
+			print(e)
+
+	# Query DataFrame Data 
+	def selectData(self, selectStr, whereStr = None,groupStr = None ,orderStr = None):
+
+		# create default Where String
+		where = "WHERE YEAR BETWEEN " + str(self.syear) + " AND " + str(self.eyear)
+		group = ''
+		order = ''
+
+		if(whereStr is not None):
+			where += " AND " + whereStr
+
+		if(groupStr is not None):
+			group = " GROUP BY " + groupStr
+		
+		if(orderStr is not None):
+			order = " ORDER BY " + orderStr
+
+		# execute query
+		sql = self.sqlContext.sql("SELECT "+selectStr+" FROM ARIA " + where + group + order)
+
+		return sql
+
+		# change type to Pandas DataFrame
+		#pandas = sql.toPandas()
+		# return pandas DataFrame
+		#return pandas
+	
+	# Confirmation whether File exists or not
+	def hdfsExists(self, path, flag = 'd'):
+		# Command parameter
+		args_list = ['hdfs','dfs','-test']
+		
+		if(flag == 'd'):
+			args_list.append('-d')
+		else:
+			args_list.append('-e')
+		
+		# Add path of hdfs to List
+		args_list.append(path)
+		print(args_list)
+		
+		if(self.run_cmd(args_list) == 0):
+			return True
+		else:
+			return False
+	
+	# Execute Command
+	def run_cmd(self, args_list):
+		try:
+			proc = subprocess.Popen(args_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+			proc.communicate()
+
+			return proc.returncode
+		except Exception as e:
+			print(e)
+			return 1
+
+###########################################################################################################################################################################
+################################################################### ARIAdate Class  #######################################################################################
+
+from datetime import datetime, timedelta
+
+# Class for handling Date Type
+class ARIAdate:
+	# Transfer Period between start date and end date to List Type
+	def betweenDate(self, date1, date2, strFormat):
+		sdate = self.getDate(date1, strFormat)
+		edate = self.getDate(date2, strFormat)
+
+		returnList = []
+		
+		for dt in self.daterange(sdate, edate):
+			returnList.append(dt.strftime(strFormat))
+		
+		return returnList
+	# String -> Date
+	def getDate(self, strDate, strFormat):
+		return datetime.strptime(strDate, strFormat)
+	
+	def daterange(self, sdate, edate):
+		for n in range(int ((edate - sdate).days) +1):
+			yield sdate + timedelta(n)
+
+	# Today
+	def getToday(self, strFormat):
+		return datetime.today().strftime(strFormat)
